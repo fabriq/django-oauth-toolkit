@@ -38,7 +38,6 @@ class ClientSecretField(models.CharField):
             return hashed_secret
         return super().pre_save(model_instance, add)
 
-
 class AbstractApplication(models.Model):
     """
     An Application instance represents a Client on the Authorization server.
@@ -326,8 +325,8 @@ class AbstractAccessToken(models.Model):
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
-        blank=True,
-        null=True,
+        blank=False,
+        null=False,
         related_name="%(app_label)s_%(class)s",
     )
     source_refresh_token = models.OneToOneField(
