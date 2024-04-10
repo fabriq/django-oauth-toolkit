@@ -23,6 +23,8 @@ We support:
 * OpenID Connect Implicit Flow
 * OpenID Connect Hybrid Flow
 
+Furthermore ``django-oauth-toolkit`` also supports `OpenID Connect RP-Initiated Logout <https://openid.net/specs/openid-connect-rpinitiated-1_0.html>`_.
+
 
 Configuration
 =============
@@ -131,6 +133,9 @@ If you would prefer to use just ``HS256`` keys, you don't need to create any
 additional keys, ``django-oauth-toolkit`` will just use the application's
 ``client_secret`` to sign the JWT token.
 
+To be able to verify the JWT's signature using the ``client_secret``, you
+must set the application's ``hash_client_secret`` to ``False``.
+
 In this case, you just need to enable OIDC and add ``openid`` to your list of
 scopes in your ``settings.py``::
 
@@ -146,6 +151,23 @@ scopes in your ``settings.py``::
 .. note::
     If you want to enable ``RS256`` at a later date, you can do so - just add
     the private key as described above.
+
+
+RP-Initiated Logout
+~~~~~~~~~~~~~~~~~~~
+This feature has to be enabled separately as it is an extension to the core standard.
+
+.. code-block:: python
+
+   OAUTH2_PROVIDER = {
+       # OIDC has to be enabled to use RP-Initiated Logout
+       "OIDC_ENABLED": True,
+       # Enable and configure RP-Initiated Logout
+       "OIDC_RP_INITIATED_LOGOUT_ENABLED": True,
+       "OIDC_RP_INITIATED_LOGOUT_ALWAYS_PROMPT": True,
+       # ... any other settings you want
+   }
+
 
 Setting up OIDC enabled clients
 ===============================
@@ -217,7 +239,7 @@ just return the same claims as the ID token.
 
 To configure all of these things we need to customize the
 ``OAUTH2_VALIDATOR_CLASS`` in ``django-oauth-toolkit``. Create a new file in
-our project, eg ``my_project/oauth_validator.py``::
+our project, eg ``my_project/oauth_validators.py``::
 
     from oauth2_provider.oauth2_validators import OAuth2Validator
 
@@ -385,7 +407,7 @@ the URLs accordingly.
 ConnectDiscoveryInfoView
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
-Available at ``/o/.well-known/openid-configuration/``, this view provides auto
+Available at ``/o/.well-known/openid-configuration``, this view provides auto
 discovery information to OIDC clients, telling them the JWT issuer to use, the
 location of the JWKs to verify JWTs with, the token and userinfo endpoints to
 query, and other details.
@@ -403,3 +425,10 @@ UserInfoView
 
 Available at ``/o/userinfo/``, this view provides extra user details. You can
 customize the details included in the response as described above.
+
+
+RPInitiatedLogoutView
+~~~~~~~~~~~~~~~~~~~~~
+
+Available at ``/o/rp-initiated-logout/``, this view allows a :term:`Client` (Relying Party) to request that a :term:`Resource Owner`
+is logged out at the :term:`Authorization Server` (OpenID Provider).

@@ -33,12 +33,7 @@ If you are facing one or more of the following:
 Django OAuth Toolkit can help you providing out of the box all the endpoints, data and logic needed to add OAuth2
 capabilities to your Django projects. Django OAuth Toolkit makes extensive use of the excellent
 `OAuthLib <https://github.com/idan/oauthlib>`_, so that everything is
-`rfc-compliant <http://tools.ietf.org/html/rfc6749>`_.
-
-Note: If you have issues installing Django 4.0.0, it is because we only support
-Django 4.0.1+ due to a regression in Django 4.0.0. Besides 4.0.0, Django 2.2+ is supported.
-`Explanation <https://github.com/jazzband/django-oauth-toolkit/pull/1046#issuecomment-998015272>`_.
-
+`rfc-compliant <https://rfc-editor.org/rfc/rfc6749.html>`_.
 
 Reporting security issues
 -------------------------
@@ -48,8 +43,8 @@ Please report any security issues to the JazzBand security team at <security@jaz
 Requirements
 ------------
 
-* Python 3.7+
-* Django 2.2, 3.2, or >=4.0.1
+* Python 3.8+
+* Django 3.2, 4.0 (4.0.1+ due to a regression), 4.1, 4.2, or 5.0
 * oauthlib 3.1+
 
 Installation

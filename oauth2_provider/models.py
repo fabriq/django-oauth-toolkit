@@ -19,7 +19,8 @@ from oauthlib.oauth2.rfc6749 import errors
 from .generators import generate_client_id, generate_client_secret
 from .scopes import get_scopes_backend
 from .settings import oauth2_settings
-from .validators import RedirectURIValidator, WildcardSet
+from .utils import jwk_from_pem
+from .validators import AllowedURIValidator
 
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,10 @@ logger = logging.getLogger(__name__)
 class ClientSecretField(models.CharField):
     def pre_save(self, model_instance, add):
         secret = getattr(model_instance, self.attname)
+        should_be_hashed = getattr(model_instance, "hash_client_secret", True)
+        if not should_be_hashed:
+            return super().pre_save(model_instance, add)
+
         try:
             hasher = identify_hasher(secret)
             logger.debug(f"{model_instance}: {self.attname} is already hashed with {hasher}.")
@@ -51,6 +56,9 @@ class AbstractApplication(models.Model):
     * :attr:`user` ref to a Django user
     * :attr:`redirect_uris` The list of allowed redirect uri. The string
                             consists of valid URLs separated by space
+    * :attr:`post_logout_redirect_uris` The list of allowed redirect uris after
+                                        an RP initiated logout. The string
+                                        consists of valid URLs separated by space
     * :attr:`client_type` Client type as described in :rfc:`2.1`
     * :attr:`authorization_grant_type` Authorization flows available to the
                                        Application
@@ -102,6 +110,11 @@ class AbstractApplication(models.Model):
         blank=True,
         help_text=_("Allowed URIs list, space separated"),
     )
+    post_logout_redirect_uris = models.TextField(
+        blank=True,
+        help_text=_("Allowed Post Logout URIs list, space separated"),
+        default="",
+    )
     client_type = models.CharField(max_length=32, choices=CLIENT_TYPES)
     authorization_grant_type = models.CharField(max_length=32, choices=GRANT_TYPES)
     client_secret = ClientSecretField(
@@ -111,12 +124,18 @@ class AbstractApplication(models.Model):
         db_index=True,
         help_text=_("Hashed on Save. Copy it now if this is a new secret."),
     )
+    hash_client_secret = models.BooleanField(default=True)
     name = models.CharField(max_length=255, blank=True)
     skip_authorization = models.BooleanField(default=False)
 
     created = models.DateTimeField(auto_now_add=True)
     updated = models.DateTimeField(auto_now=True)
     algorithm = models.CharField(max_length=5, choices=ALGORITHM_TYPES, default=NO_ALGORITHM, blank=True)
+    allowed_origins = models.TextField(
+        blank=True,
+        help_text=_("Allowed origins list to enable CORS, space separated"),
+        default="",
+    )
 
     class Meta:
         abstract = True
@@ -149,6 +168,22 @@ class AbstractApplication(models.Model):
         """
         return redirect_to_uri_allowed(uri, self.redirect_uris.split())
 
+    def post_logout_redirect_uri_allowed(self, uri):
+        """
+        Checks if given URI is one of the items in :attr:`post_logout_redirect_uris` string
+
+        :param uri: URI to check
+        """
+        return redirect_to_uri_allowed(uri, self.post_logout_redirect_uris.split())
+
+    def origin_allowed(self, origin):
+        """
+        Checks if given origin is one of the items in :attr:`allowed_origins` string
+
+        :param origin: Origin to check
+        """
+        return self.allowed_origins and is_origin_allowed(origin, self.allowed_origins.split())
+
     def clean(self):
         from django.core.exceptions import ValidationError
 
@@ -166,12 +201,11 @@ class AbstractApplication(models.Model):
         allowed_schemes = set(s.lower() for s in self.get_allowed_schemes())
 
         if redirect_uris:
-            validator = RedirectURIValidator(WildcardSet())
+            validator = AllowedURIValidator(
+                allowed_schemes, name="redirect uri", allow_path=True, allow_query=True
+            )
             for uri in redirect_uris:
                 validator(uri)
-                scheme = urlparse(uri).scheme
-                if scheme not in allowed_schemes:
-                    raise ValidationError(_("Unauthorized redirect scheme: {scheme}").format(scheme=scheme))
 
         elif self.authorization_grant_type in grant_types:
             raise ValidationError(
@@ -179,6 +213,13 @@ class AbstractApplication(models.Model):
                     grant_type=self.authorization_grant_type
                 )
             )
+        allowed_origins = self.allowed_origins.strip().split()
+        if allowed_origins:
+            # oauthlib allows only https scheme for CORS
+            validator = AllowedURIValidator(oauth2_settings.ALLOWED_SCHEMES, "allowed origin")
+            for uri in allowed_origins:
+                validator(uri)
+
         if self.algorithm == AbstractApplication.RS256_ALGORITHM:
             if not oauth2_settings.OIDC_RSA_PRIVATE_KEY:
                 raise ValidationError(_("You must set OIDC_RSA_PRIVATE_KEY to use RSA algorithm"))
@@ -218,7 +259,7 @@ class AbstractApplication(models.Model):
         if self.algorithm == AbstractApplication.RS256_ALGORITHM:
             if not oauth2_settings.OIDC_RSA_PRIVATE_KEY:
                 raise ImproperlyConfigured("You must set OIDC_RSA_PRIVATE_KEY to use RSA algorithm")
-            return jwk.JWK.from_pem(oauth2_settings.OIDC_RSA_PRIVATE_KEY.encode("utf8"))
+            return jwk_from_pem(oauth2_settings.OIDC_RSA_PRIVATE_KEY)
         elif self.algorithm == AbstractApplication.HS256_ALGORITHM:
             return jwk.JWK(kty="oct", k=base64url_encode(self.client_secret))
         raise ImproperlyConfigured("This application does not support signed tokens")
@@ -340,6 +381,7 @@ class AbstractAccessToken(models.Model):
     token = models.CharField(
         max_length=255,
         unique=True,
+        db_index=True,
     )
     id_token = models.OneToOneField(
         oauth2_settings.ID_TOKEN_MODEL,
@@ -748,9 +790,31 @@ def redirect_to_uri_allowed(uri, allowed_uris):
             and parsed_allowed_uri.netloc == parsed_uri.netloc
             and parsed_allowed_uri.path == parsed_uri.path
         ):
-
             aqs_set = set(parse_qsl(parsed_allowed_uri.query))
             if aqs_set.issubset(uqs_set):
                 return True
 
+    return False
+
+
+def is_origin_allowed(origin, allowed_origins):
+    """
+    Checks if a given origin uri is allowed based on the provided allowed_origins configuration.
+
+    :param origin: Origin URI to check
+    :param allowed_origins: A list of Origin URIs that are allowed
+    """
+
+    parsed_origin = urlparse(origin)
+
+    if parsed_origin.scheme not in oauth2_settings.ALLOWED_SCHEMES:
+        return False
+
+    for allowed_origin in allowed_origins:
+        parsed_allowed_origin = urlparse(allowed_origin)
+        if (
+            parsed_allowed_origin.scheme == parsed_origin.scheme
+            and parsed_allowed_origin.netloc == parsed_origin.netloc
+        ):
+            return True
     return False

@@ -4,6 +4,7 @@ import json
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.contrib.auth.hashers import make_password
 from django.test import TestCase, TransactionTestCase
 from django.utils import timezone
 from jwcrypto import jwt
@@ -30,6 +31,7 @@ AccessToken = get_access_token_model()
 RefreshToken = get_refresh_token_model()
 
 CLEARTEXT_SECRET = "1234567890abcdefghijklmnopqrstuvwxyz"
+CLEARTEXT_BLANK_SECRET = ""
 
 
 @contextlib.contextmanager
@@ -61,11 +63,25 @@ class TestOAuth2Validator(TransactionTestCase):
         )
         self.request.client = self.application
 
+        self.blank_secret_request = mock.MagicMock(wraps=Request)
+        self.blank_secret_request.user = self.user
+        self.blank_secret_request.grant_type = "not client"
+        self.blank_secret_application = Application.objects.create(
+            client_id="blank_secret_client_id",
+            client_secret=CLEARTEXT_BLANK_SECRET,
+            user=self.user,
+            client_type=Application.CLIENT_PUBLIC,
+            authorization_grant_type=Application.GRANT_PASSWORD,
+        )
+        self.blank_secret_request.client = self.blank_secret_application
+
     def tearDown(self):
         self.application.delete()
 
     def test_authenticate_request_body(self):
         self.request.client_id = "client_id"
+        self.assertFalse(self.validator._authenticate_request_body(self.request))
+
         self.request.client_secret = ""
         self.assertFalse(self.validator._authenticate_request_body(self.request))
 
@@ -74,6 +90,27 @@ class TestOAuth2Validator(TransactionTestCase):
 
         self.request.client_secret = CLEARTEXT_SECRET
         self.assertTrue(self.validator._authenticate_request_body(self.request))
+
+        self.blank_secret_request.client_id = "blank_secret_client_id"
+        self.assertTrue(self.validator._authenticate_request_body(self.blank_secret_request))
+
+        self.blank_secret_request.client_secret = CLEARTEXT_BLANK_SECRET
+        self.assertTrue(self.validator._authenticate_request_body(self.blank_secret_request))
+
+        self.blank_secret_request.client_secret = "wrong_client_secret"
+        self.assertFalse(self.validator._authenticate_request_body(self.blank_secret_request))
+
+    def test_authenticate_request_body_unhashed_secret(self):
+        self.application.client_secret = CLEARTEXT_SECRET
+        self.application.hash_client_secret = False
+        self.application.save()
+
+        self.request.client_id = "client_id"
+        self.request.client_secret = CLEARTEXT_SECRET
+        self.assertTrue(self.validator._authenticate_request_body(self.request))
+
+        self.application.hash_client_secret = True
+        self.application.save()
 
     def test_extract_basic_auth(self):
         self.request.headers = {"HTTP_AUTHORIZATION": "Basic 123456"}
@@ -87,7 +124,16 @@ class TestOAuth2Validator(TransactionTestCase):
         self.request.headers = {"HTTP_AUTHORIZATION": "Basic 123456 789"}
         self.assertEqual(self.validator._extract_basic_auth(self.request), "123456 789")
 
-    def test_authenticate_basic_auth(self):
+    def test_authenticate_basic_auth_hashed_secret(self):
+        self.request.encoding = "utf-8"
+        self.request.headers = get_basic_auth_header("client_id", CLEARTEXT_SECRET)
+        self.assertTrue(self.validator._authenticate_basic_auth(self.request))
+
+    def test_authenticate_basic_auth_unhashed_secret(self):
+        self.application.client_secret = CLEARTEXT_SECRET
+        self.application.hash_client_secret = False
+        self.application.save()
+
         self.request.encoding = "utf-8"
         self.request.headers = get_basic_auth_header("client_id", CLEARTEXT_SECRET)
         self.assertTrue(self.validator._authenticate_basic_auth(self.request))
@@ -123,6 +169,13 @@ class TestOAuth2Validator(TransactionTestCase):
         # b64decode("test") will become b"\xb5\xeb-", it can"t be decoded as utf-8
         self.request.headers = {"HTTP_AUTHORIZATION": "Basic test"}
         self.assertFalse(self.validator._authenticate_basic_auth(self.request))
+
+    def test_authenticate_check_secret(self):
+        hashed = make_password(CLEARTEXT_SECRET)
+        self.assertTrue(self.validator._check_secret(CLEARTEXT_SECRET, CLEARTEXT_SECRET))
+        self.assertTrue(self.validator._check_secret(CLEARTEXT_SECRET, hashed))
+        self.assertFalse(self.validator._check_secret(hashed, hashed))
+        self.assertFalse(self.validator._check_secret(hashed, CLEARTEXT_SECRET))
 
     def test_authenticate_client_id(self):
         self.assertTrue(self.validator.authenticate_client_id("client_id", self.request))
@@ -160,7 +213,6 @@ class TestOAuth2Validator(TransactionTestCase):
             self.validator.save_bearer_token(token, mock.MagicMock())
 
     def test_save_bearer_token__with_existing_tokens__does_not_create_new_tokens(self):
-
         rotate_token_function = mock.MagicMock()
         rotate_token_function.return_value = False
         self.validator.rotate_refresh_token = rotate_token_function
@@ -190,7 +242,6 @@ class TestOAuth2Validator(TransactionTestCase):
         self.assertEqual(1, AccessToken.objects.count())
 
     def test_save_bearer_token__checks_to_rotate_tokens(self):
-
         rotate_token_function = mock.MagicMock()
         rotate_token_function.return_value = False
         self.validator.rotate_refresh_token = rotate_token_function
@@ -289,7 +340,7 @@ class TestOAuth2ValidatorProvidesErrorData(TransactionTestCase):
     """These test cases check that the recommended error codes are returned
     when token authentication fails.
 
-    RFC-6750: https://tools.ietf.org/html/rfc6750
+    RFC-6750: https://rfc-editor.org/rfc/rfc6750.html
 
     > If the protected resource request does not include authentication
     > credentials or does not contain an access token that enables access
@@ -309,7 +360,7 @@ class TestOAuth2ValidatorProvidesErrorData(TransactionTestCase):
     > attribute to provide the client with the reason why the access
     > request was declined.
 
-    See https://tools.ietf.org/html/rfc6750#section-3.1 for the allowed error
+    See https://rfc-editor.org/rfc/rfc6750.html#section-3.1 for the allowed error
     codes.
     """
 
@@ -426,11 +477,12 @@ class TestOAuth2ValidatorErrorResourceToken(TestCase):
     is unsuccessful.
     """
 
-    def setUp(self):
-        self.token = "test_token"
-        self.introspection_url = "http://example.com/token/introspection/"
-        self.introspection_token = "test_introspection_token"
-        self.validator = OAuth2Validator()
+    @classmethod
+    def setUpTestData(cls):
+        cls.token = "test_token"
+        cls.introspection_url = "http://example.com/token/introspection/"
+        cls.introspection_token = "test_introspection_token"
+        cls.validator = OAuth2Validator()
 
     def test_response_when_auth_server_response_return_404(self):
         with self.assertLogs(logger="oauth2_provider") as mock_log:

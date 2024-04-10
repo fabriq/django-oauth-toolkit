@@ -38,10 +38,23 @@ class Command(BaseCommand):
             help="The redirect URIs, this must be a space separated string e.g 'URI1 URI2'",
         )
         parser.add_argument(
+            "--post-logout-redirect-uris",
+            type=str,
+            help="The post logout redirect URIs, this must be a space separated string e.g 'URI1 URI2'",
+            default="",
+        )
+        parser.add_argument(
             "--client-secret",
             type=str,
             help="The secret for this application",
         )
+        parser.add_argument(
+            "--no-hash-client-secret",
+            dest="hash_client_secret",
+            action="store_false",
+            help="Don't hash the client secret",
+        )
+        parser.set_defaults(hash_client_secret=True)
         parser.add_argument(
             "--name",
             type=str,
@@ -68,7 +81,7 @@ class Command(BaseCommand):
             # Data in options must be cleaned because there are unneeded key-value like
             # verbosity and others. Also do not pass any None to the Application
             # instance so default values will be generated for those fields
-            if key in application_fields and value:
+            if key in application_fields and (isinstance(value, bool) or value):
                 if key == "user":
                     application_data.update({"user_id": value})
                 else:
